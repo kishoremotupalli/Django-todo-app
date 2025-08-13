@@ -1,0 +1,121 @@
+pipeline {
+  agent any
+
+  options {
+    timestamps()
+    ansiColor('xterm')
+  }
+
+  parameters {
+    string(name: 'AWS_REGION', defaultValue: 'ap-south-1', description: 'AWS Region')
+    string(name: 'APP_NAME',   defaultValue: 'expense-tracker', description: 'App base name')
+    string(name: 'ENV',        defaultValue: 'dev', description: 'Environment')
+    booleanParam(name: 'APPLY_INFRA', defaultValue: false, description: 'Run Terraform apply')
+  }
+
+  environment {
+    AWS_REGION   = "${params.AWS_REGION}"
+    APP_NAME     = "${params.APP_NAME}"
+    ECR_REPO     = "${APP_NAME}-repo"
+    IMAGE_TAG    = "${env.BUILD_NUMBER}"
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        git credentialsId: 'github-creds', url: 'https://github.com/your-org/your-repo.git', branch: 'main'
+      }
+    }
+
+    stage('(Optional) Terraform Apply') {
+      when { expression { return params.APPLY_INFRA } }
+      environment {
+        TF_IN_AUTOMATION = 'true'
+      }
+      steps {
+        withAWS(credentials: 'aws-eks', region: "${AWS_REGION}") {
+          dir('devops/terraform') {
+            sh 'terraform init -upgrade'
+            sh 'terraform validate'
+            sh 'terraform plan -out plan.tfplan'
+            sh 'terraform apply -auto-approve plan.tfplan'
+            // capture ECR URL for later stages (also can be computed)
+            script {
+              env.ECR_URL = sh(script: "terraform output -raw ecr_url", returnStdout: true).trim()
+              env.CLUSTER_NAME = sh(script: "terraform output -raw cluster_name", returnStdout: true).trim()
+            }
+          }
+        }
+      }
+    }
+
+    stage('Set ECR/Cluster if not from Terraform') {
+      when { expression { return !params.APPLY_INFRA } }
+      steps {
+        script {
+          // If infra already exists, set known values:
+          env.CLUSTER_NAME = "${APP_NAME}-eks"
+          env.ECR_URL = sh(script: "aws ecr describe-repositories --repository-names ${ECR_REPO} --query 'repositories[0].repositoryUri' --output text --region ${AWS_REGION}", returnStdout: true).trim()
+        }
+      }
+    }
+
+    stage('Build & Unit Tests') {
+      steps {
+        sh 'echo "run your tests here"; true'
+      }
+    }
+
+    stage('Docker Build') {
+      steps {
+        dir('devops/docker') {
+          sh """
+            docker build -t ${ECR_REPO}:${IMAGE_TAG} -f Dockerfile ../../
+          """
+        }
+      }
+    }
+
+    stage('Login to ECR & Push Image') {
+      steps {
+        withAWS(credentials: 'aws-eks', region: "${AWS_REGION}") {
+          sh """
+            aws ecr get-login-password --region ${AWS_REGION} \
+              | docker login --username AWS --password-stdin ${ECR_URL%/*}
+            docker tag ${ECR_REPO}:${IMAGE_TAG} ${ECR_URL}:${IMAGE_TAG}
+            docker push ${ECR_URL}:${IMAGE_TAG}
+          """
+        }
+      }
+    }
+
+    stage('Configure kubectl') {
+      steps {
+        withAWS(credentials: 'aws-eks', region: "${AWS_REGION}") {
+          sh "aws eks update-kubeconfig --name ${CLUSTER_NAME} --region ${AWS_REGION}"
+        }
+      }
+    }
+
+    stage('Deploy to EKS') {
+      steps {
+        sh """
+          kubectl apply -f devops/k8s/namespace.yaml
+          # Substitute image in manifest (simple inline replace)
+          sed "s|REPLACE_ECR_URL:REPLACE_TAG|${ECR_URL}:${IMAGE_TAG}|g" devops/k8s/deployment.yaml | kubectl apply -f -
+          kubectl apply -f devops/k8s/service.yaml
+        """
+      }
+    }
+  }
+
+  post {
+    success {
+      sh 'kubectl get svc -n app app-svc -o wide || true'
+      echo "Deployment successful. Check the EXTERNAL-IP of 'app-svc'."
+    }
+    failure {
+      echo "Build failed. Check console output."
+    }
+  }
+}

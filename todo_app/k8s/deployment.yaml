@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-deploy
+  namespace: app
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: web }
+  template:
+    metadata:
+      labels: { app: web }
+    spec:
+      containers:
+        - name: web
+          image: REPLACE_ECR_URL:REPLACE_TAG   # Jenkins will replace
+          ports:
+            - containerPort: 8000
+          env:
+            - name: ENV
+              value: "dev"
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "512Mi" }
+          readinessProbe:
+            httpGet: { path: "/", port: 8000 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: "/", port: 8000 }
+            initialDelaySeconds: 15
+            periodSeconds: 15
