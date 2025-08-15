@@ -1,0 +1,16 @@
+Django>=4.0,<5.0
+djangorestframework>=3.13.0
+gunicorn>=20.1.0
+psycopg2-binary>=2.9.0
+whitenoise>=6.0.0
+
+# DevOps / Deployment (optional based on use)
+django-environ>=0.9.0
+python-decouple>=3.6
+
+# Kubernetes / CI/CD (optional tools)
+kubernetes>=25.3.0
+pyyaml>=6.0
+
+# Static files & front-end support
+django-crispy-forms>=2.0
